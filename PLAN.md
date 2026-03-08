@@ -5,16 +5,18 @@
 - **Vendor-neutral**: All changes use Vulkan spec features only (no driver-specific extensions). Works on RADV, NVIDIA proprietary, ANV (Intel), lavapipe, etc.
 - **NVIDIA-safe**: No changes to CUDA/NCCL paths. Vulkan backend changes use standard Vulkan 1.2+ APIs (timeline semaphores, host-visible staging). NVIDIA's Vulkan driver supports all of these.
 - **Upstreamable**: Minimal, surgical changes. Phase 1 (async+events) is a standalone improvement that benefits single-GPU Vulkan too. Each phase can be upstreamed independently.
-- **Host-staging model**: Cross-device transfers go through host-visible memory (GPU A → host → GPU B). This is the only portable approach in the Vulkan spec. Avoids driver-specific P2P extensions like `VK_KHR_external_memory_fd`.
+- **Host-staging model**: Cross-device transfers go through host-visible memory (GPU A → host → GPU B). This is the only portable approach in the Vulkan spec. Phase 12 adds optional dmabuf P2P for RADV.
 
 ## File Layout
 
-- `ggml/src/ggml-vulkan.cpp` — direct submodule edits for vtable wiring, event functions (Phase 1)
-- `ggml/src/ggml-vulkan-multigpu.cpp` — **new file** for split buffer type, cross-device staging, topology (Phases 2-5)
+- `ggml/src/ggml-vulkan.cpp` — direct submodule edits for vtable wiring, event functions, async paths
+- `ggml/src/ggml-vulkan-multigpu.cpp` — **new file** for split buffer type, cross-device staging, topology
 - `ggml/include/ggml-vulkan.h` — public API additions (split buffer type)
 - `src/llama.cpp` — integration points for split mode graph
 
 ## Phases
+
+### Foundation (complete)
 
 1. [PHASE 1: Enable Async Interface and Events](PHASE1.md) — **COMPLETE**
 2. [PHASE 2: Implement Vulkan Split Buffer Type](PHASE2.md) — **COMPLETE**
@@ -22,6 +24,15 @@
 4. [PHASE 4: Async Execution and Pipeline Parallelism](PHASE4.md) — **COMPLETE**
 5. [PHASE 5: Topology Discovery and Performance Tuning](PHASE5.md) — **COMPLETE**
 6. [PHASE 6: Runtime Testing, IQK Fallbacks, and lavapipe Fixes](PHASE6.md) — **COMPLETE**
+
+### Performance (planned)
+
+7. [PHASE 7: Async Cross-Device Copy Pipeline](PHASE7.md) — PLANNED
+8. [PHASE 8: Double-Buffered Staging](PHASE8.md) — PLANNED
+9. [PHASE 9: Parallel Split Buffer Uploads](PHASE9.md) — PLANNED
+10. [PHASE 10: True Async Graph Compute](PHASE10.md) — PLANNED
+11. [PHASE 11: Transfer Queue Utilization During Graph Execution](PHASE11.md) — PLANNED
+12. [PHASE 12: dmabuf Zero-Copy Cross-Device Transfer (RADV)](PHASE12.md) — PLANNED (optional)
 
 ## Upstreamability Notes
 
@@ -33,3 +44,20 @@
 | 4 | Medium | Async pipeline, needs careful testing on multiple vendors |
 | 5 | Low | Read-only topology query, no behavioral change |
 | 6 | Low-Medium | Scalar fallbacks and graceful stubs improve non-AVX2 builds; lavapipe fixes are additive |
+| 7 | Medium | Replaces sync fence with timeline semaphore in copy path |
+| 8 | Low | Internal buffer management change, no API impact |
+| 9 | Low | Parallel uploads, independent per-device operations |
+| 10 | Medium-High | Changes graph_compute contract from sync to async; scheduler must call synchronize |
+| 11 | Medium-High | Adds cross-queue dependencies within a device; complex synchronization |
+| 12 | Low (optional) | Driver-specific, behind capability probe, clean fallback |
+
+## Performance Impact Summary
+
+| Phase | Primary Benefit | Workload |
+|-------|----------------|----------|
+| 7 | Eliminates fence stall per cross-device copy | All multi-GPU |
+| 8 | Overlaps staging with compute | Prompt processing |
+| 9 | Parallel model loading | Startup time |
+| 10 | Overlaps graph execution across GPUs | Prompt processing |
+| 11 | Overlaps DMA with compute on same GPU | Bandwidth-bound ops |
+| 12 | 2x cross-device bandwidth (RADV only) | All multi-GPU |
