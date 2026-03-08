@@ -26,15 +26,28 @@ Deliberately terrible hardware to stress-test the implementation at the low end.
 
 Mixed-generation discrete AMD GPUs over PCIe. The 6800 XT (RDNA 2) is roughly 2x the compute throughput of the Vega (GCN 5). Different warp sizes (32 vs 64) and different PCIe generations test asymmetric device handling.
 
-## Model
+## Models
 
-| Model | Quantization | Size | Parameters |
-|-------|-------------|------|------------|
-| TinyLlama 1.1B Chat v1.0 | Q2_K (Medium) | 459 MiB | 1.1 B |
+| Model | Quantization | Size | Parameters | Vulkan Graph Splits |
+|-------|-------------|------|------------|-------------------|
+| TinyLlama 1.1B Chat v1.0 | Q2_K | 459 MiB | 1.1 B | 2 (optimal) |
+| Llama-2-7B | Q8_0 | 6.7 GiB | 6.7 B | 2 (optimal) |
 
-Source: `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF`
+Sources: `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF`, `TheBloke/Llama-2-7B-GGUF`
 
-Small model chosen to fit in all test configurations including the 2 GB Polaris 12. Not representative of real multi-GPU workloads (model fits on a single GPU), but validates correctness and measures transfer overhead.
+### Model Compatibility Notes
+
+Not all models work efficiently on the ik_llama.cpp Vulkan backend. Models with unsupported ops create excessive graph splits, causing constant GPU↔CPU bouncing:
+
+| Model | Arch | Graph Splits | Status |
+|-------|------|-------------|--------|
+| TinyLlama 1.1B | llama | 2 | Fast |
+| Llama-2-7B | llama | 2 | Fast |
+| Llama-3.2-3B | llama | 58 | Very slow (unsupported ops per layer) |
+| Qwen3.5-4B | qwen35 (SSM+attn) | 306 | Very slow |
+| GLM-4.7-Flash | deepseek2 (MoE) | 186 | Very slow |
+
+Graph splits > ~5 on single GPU indicates ops falling back to CPU — a performance disaster regardless of GPU speed.
 
 ## Results
 
@@ -62,7 +75,7 @@ No improvement because lavapipe's "uploads" are instant memcpy. Benefit requires
 
 ### System B: Real Multi-GPU (RX 6800 XT + Vega)
 
-#### Single GPU vs Multi-GPU (125 token prompt, 4 eval tokens)
+#### TinyLlama 1.1B Q2_K (125 token prompt, 4 eval tokens)
 
 | Configuration | Prompt eval | Token gen | Load time |
 |--------------|------------|-----------|-----------|
@@ -70,14 +83,33 @@ No improvement because lavapipe's "uploads" are instant memcpy. Benefit requires
 | Vega alone | 92 ms (1354 tok/s) | 13.12 ms/tok (76 tok/s) | 375 ms |
 | Both GPUs (smgs 1:1) | 131 ms (958 tok/s) | 15.78 ms/tok (63 tok/s) | 271 ms |
 
+#### Llama-2-7B Q8_0 (127 token prompt, 4 eval tokens, best of 3)
+
+| Configuration | Prompt eval | Token gen | Load time |
+|--------------|------------|-----------|-----------|
+| RX 6800 XT alone | 166 ms (767 tok/s) | 25.95 ms/tok (38.5 tok/s) | 1919 ms |
+| Vega alone | 306 ms (416 tok/s) | 33.07 ms/tok (30.2 tok/s) | 5293 ms |
+| Both GPUs (smgs 1:1) | 396 ms (321 tok/s) | 41.12 ms/tok (24.3 tok/s) | 3554 ms |
+
 #### Analysis
 
-Multi-GPU is **slower** than single GPU for this model. This is expected and correct:
+Multi-GPU is **slower** than single GPU for both models. This is expected and correct:
 
-1. **Model fits on one GPU**: TinyLlama at 459 MiB fits easily in 16 GB (6800 XT) or 8 GB (Vega). No need to split.
-2. **Transfer overhead dominates**: Every token requires cross-device copies through host staging (GPU A → host → GPU B). For a model this small, the copy time exceeds the compute savings from splitting.
-3. **Asymmetric GPUs**: The 6800 XT is ~1.75x faster than Vega for this workload. With 1:1 split, the faster GPU idles waiting for the slower one.
+1. **Both models fit on one GPU**: TinyLlama (459 MiB) and Llama-2-7B (6.7 GiB) both fit in 16 GB (6800 XT). No need to split.
+2. **Transfer overhead dominates**: Every token requires cross-device copies through host staging (GPU A → host → GPU B). For models this size, the copy time (~15 ms/tok) exceeds the compute savings from splitting.
+3. **Asymmetric GPUs**: The 6800 XT is ~1.3-1.8x faster than Vega depending on workload. With 1:1 split, the faster GPU idles waiting for the slower one.
 4. **Graph splits = 3**: Minimal parallelism opportunity. Each split boundary requires a synchronization point.
+
+#### Cross-device transfer overhead
+
+Measured consistently across both models:
+
+| Model | Single GPU best | Multi-GPU | Overhead per token |
+|-------|----------------|-----------|-------------------|
+| TinyLlama 1.1B | 11.0 ms/tok | 15.8 ms/tok | ~5 ms |
+| Llama-2-7B | 26.0 ms/tok | 41.1 ms/tok | ~15 ms |
+
+The overhead scales with model size (more data to transfer per split boundary). For a 70B model where single-token eval takes ~200-500ms, this ~15 ms overhead would be negligible (<5%).
 
 #### When Multi-GPU Helps
 
@@ -87,7 +119,7 @@ Multi-GPU split mode graph is designed for models that **don't fit** on a single
 - **Large batch prompt processing**: With enough compute per split, the transfer overhead becomes negligible relative to matmul time.
 - **Memory-bandwidth-bound workloads**: Splitting across GPUs effectively doubles available memory bandwidth.
 
-The overhead measured here (~16 ms/tok for cross-device copies) would be negligible for a 70B model where single-token eval takes ~200-500ms on one GPU.
+The overhead measured here would be negligible for larger models where compute time per token is much higher.
 
 ## Runtime Flags
 
