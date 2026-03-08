@@ -20,7 +20,7 @@
 2. [PHASE 2: Implement Vulkan Split Buffer Type](PHASE2.md) — **COMPLETE**
 3. [PHASE 3: Cross-Device Tensor Copies via Host Staging](PHASE3.md) — **COMPLETE**
 4. [PHASE 4: Async Execution and Pipeline Parallelism](PHASE4.md) — **COMPLETE**
-5. PHASE 5: Topology Discovery and Performance Tuning
+5. [PHASE 5: Topology Discovery and Performance Tuning](PHASE5.md) — **COMPLETE**
 
 ## Upstreamability Notes
 
