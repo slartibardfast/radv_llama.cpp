@@ -31,8 +31,8 @@
 8. [PHASE 8: Double-Buffered Staging](PHASE8.md) — **COMPLETE**
 9. [PHASE 9: Parallel Split Buffer Uploads](PHASE9.md) — **COMPLETE**
 10. [PHASE 10: True Async Graph Compute](PHASE10.md) — **COMPLETE**
-11. [PHASE 11: Transfer Queue Utilization During Graph Execution](PHASE11.md) — PLANNED
-12. [PHASE 12: dmabuf Zero-Copy Cross-Device Transfer (RADV)](PHASE12.md) — PLANNED (optional)
+11. [PHASE 11: Transfer Queue Utilization During Graph Execution](PHASE11.md) — SKIPPED (cross-device copies already use transfer queues; no DMA/compute overlap opportunity with 3 graph splits)
+12. [PHASE 12: dmabuf Zero-Copy Cross-Device Transfer (RADV)](PHASE12.md) — **COMPLETE**
 
 ## Upstreamability Notes
 

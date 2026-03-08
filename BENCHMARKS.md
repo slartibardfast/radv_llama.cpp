@@ -147,6 +147,40 @@ Multi-GPU is still slower because the model fits on one GPU. The 2:1 split is ~7
 
 The overhead scales roughly with model size. For models large enough to genuinely require splitting (>16 GB), the compute savings from not running out of VRAM far outweigh this transfer cost — the alternative is not being able to run at all.
 
+### Phase 12: dmabuf Zero-Copy (RX 6800 XT + Vega)
+
+#### TinyLlama 1.1B Q2_K (111 token prompt, 3 eval tokens, best of 3)
+
+| Configuration | Prompt eval | Token gen | Load time |
+|--------------|------------|-----------|-----------|
+| RX 6800 XT alone | 99 ms (1117 tok/s) | 11.08 ms/tok (90 tok/s) | 236 ms |
+| Both GPUs (smgs 1:1) | 106 ms (1043 tok/s) | 10.34 ms/tok (97 tok/s) | 271 ms |
+
+#### Llama-2-7B Q8_0 (109 token prompt, 3 eval tokens, best of 3)
+
+| Configuration | Prompt eval | Token gen | Load time |
+|--------------|------------|-----------|-----------|
+| RX 6800 XT alone | 285 ms (382 tok/s) | 24.98 ms/tok (40 tok/s) | 2995 ms |
+| Both GPUs (smgs 1:1) | 306 ms (356 tok/s) | 25.77 ms/tok (39 tok/s) | 3596 ms |
+
+#### Llama-2-13B Q8_0 (109 token prompt, 3 eval tokens, best of 3)
+
+| Configuration | Prompt eval | Token gen | Load time |
+|--------------|------------|-----------|-----------|
+| RX 6800 XT alone | 465 ms (234 tok/s) | 50.27 ms/tok (20 tok/s) | 5999 ms |
+| Both GPUs (smgs 1:1) | 510 ms (214 tok/s) | 46.60 ms/tok (21 tok/s) | 7061 ms |
+| Both GPUs (smgs 2:1) | 465 ms (234 tok/s) | 50.25 ms/tok (20 tok/s) | 5998 ms |
+
+#### Phase 12 vs Phase 10: Transfer Overhead Comparison
+
+| Model | Phase 10 overhead/tok | Phase 12 overhead/tok | Improvement |
+|-------|----------------------|----------------------|-------------|
+| TinyLlama 1.1B | ~5 ms | ~-0.7 ms | Eliminated |
+| Llama-2-7B | ~15 ms | ~1 ms | 15x reduction |
+| Llama-2-13B (1:1) | ~26 ms | ~-4 ms | Eliminated |
+
+dmabuf eliminates CPU memcpy overhead. Multi-GPU token generation is now **faster** than single-GPU for TinyLlama (97 vs 90 tok/s) and Llama-2-13B 1:1 (21 vs 20 tok/s) due to doubled memory bandwidth outweighing the minimal remaining transfer cost.
+
 ## Runtime Flags
 
 | Flag | Purpose |
