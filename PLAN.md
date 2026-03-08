@@ -7,6 +7,13 @@
 - **Upstreamable**: Minimal, surgical changes. Phase 1 (async+events) is a standalone improvement that benefits single-GPU Vulkan too. Each phase can be upstreamed independently.
 - **Host-staging model**: Cross-device transfers go through host-visible memory (GPU A → host → GPU B). This is the only portable approach in the Vulkan spec. Avoids driver-specific P2P extensions like `VK_KHR_external_memory_fd`.
 
+## File Layout
+
+- `ggml/src/ggml-vulkan.cpp` — direct submodule edits for vtable wiring, event functions (Phase 1)
+- `ggml/src/ggml-vulkan-multigpu.cpp` — **new file** for split buffer type, cross-device staging, topology (Phases 2-5)
+- `ggml/include/ggml-vulkan.h` — public API additions (split buffer type)
+- `src/llama.cpp` — integration points for split mode graph
+
 ## Phases
 
 1. [PHASE 1: Enable Async Interface and Events](PHASE1.md) — **IN PROGRESS**
