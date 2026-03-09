@@ -125,10 +125,8 @@ When weight tensors have `extra` set (split across devices):
 | `FUSED_UP_GATE` | `llm_build_ffn` (line 774) — per-device fused FFN | **YES** |
 | `MUL_MAT` | `llm_build_ffn` (line 780) — per-device down projection | **YES** |
 | `CPY` (cast) | `llm_build_ffn` (line 787) — cast to reduce_type (F16) | **YES** |
-| `REDUCE` | `llm_build_ffn` (line 811) — cross-device sum | N/A\*\* |
+| `REDUCE` | `llm_build_ffn` (line 811) — cross-device sum | **YES** |
 | `ADD` | `llm_build_ffn` (line 804) — residual add | **YES** |
-
-\*\*`REDUCE` is not a standard Vulkan op — it's handled by our multi-GPU infrastructure (cross-device staging + `ADD`).
 
 ### Per-Layer: Residual
 
@@ -395,3 +393,55 @@ All tests verified on both GPUs:
 | FUSED_UP_GATE (custom eval) | 143/143 | PASS |
 | MULTI_ADD (custom eval) | 12/12 | PASS |
 | **Total** | **1377** | **PASS** |
+
+---
+
+## REDUCE Op Implementation
+
+### Problem
+
+Multi-GPU split-mode graph (`-sm graph`) crashed with `Missing op: REDUCE`. The REDUCE op is emitted at 5 sites in `llama-build-context.cpp` (FFN, MoE, attention) for cross-device partial sum accumulation. It had no Vulkan shader and no `supports_op` entry.
+
+### Architecture
+
+`ggml_reduce()` creates a VIEW tensor with `op = GGML_OP_REDUCE` and `src[0..n-1]` pointing to partial sums from each GPU. The scheduler creates single-node REDUCE splits, provides barriers between devices, and expects the backend to handle the cross-device data movement.
+
+The CUDA backend implements REDUCE using `cudaMemcpyPeerAsync` with ring-reduce and P2P memory access. Vulkan does not have P2P — each device has isolated memory.
+
+### Vulkan Implementation
+
+CPU-mediated host-staging approach:
+
+1. Read local partial sum from the REDUCE node's view buffer to host memory
+2. For each remote source, read its data to host memory via `ggml_vk_buffer_read` (submits transfer commands on the remote device)
+3. Element-wise ADD on CPU (F32 or F16)
+4. Write accumulated result back to local device buffer
+
+The implementation lives in `ggml_vk_reduce()`, called early from `graph_compute` before any GPU command recording. REDUCE is added to `supports_op` and handled as a no-op return in `build_graph`.
+
+### Changes
+
+| File | Change |
+|---|---|
+| `ggml/src/ggml-vulkan.cpp` | `ggml_vk_reduce()` — CPU-mediated cross-device ADD |
+| `ggml/src/ggml-vulkan.cpp` | `graph_compute` — early return for REDUCE graphs |
+| `ggml/src/ggml-vulkan.cpp` | `build_graph` — `case GGML_OP_REDUCE: return false` |
+| `ggml/src/ggml-vulkan.cpp` | `supports_op` — `case GGML_OP_REDUCE: return true` (F32/F16, contiguous) |
+
+### Performance
+
+Tested with Nemotron-Nano-4B-Q4_K_M on Vega + 6800 XT:
+
+| Mode | Splits | Prompt (tok/s) | Gen (tok/s) | Notes |
+|---|---|---|---|---|
+| Single GPU (6800 XT) | 2 | 196 | 47 | Baseline |
+| Multi-GPU, layer split | 3 | 98 | 18 | No REDUCE needed |
+| Multi-GPU, graph split | 193 | 9 | 6.5 | 64 REDUCE ops per token |
+
+The CPU-mediated REDUCE is a correctness implementation — not optimized. Each REDUCE does two synchronous GPU→host reads + one host→GPU write. For graph-split mode with 193 splits, this creates significant overhead. Layer-split mode (default) avoids REDUCE entirely.
+
+### Future Optimization
+
+- **dmabuf GPU-side REDUCE**: Use the existing dmabuf infrastructure to copy remote buffers as GPU→GPU, then dispatch an ADD shader. Eliminates CPU round-trip.
+- **Async pipelining**: Overlap REDUCE copies with subsequent GPU compute.
+- Currently only F32 and F16 types are supported (matches the model's `reduce_type` setting).
