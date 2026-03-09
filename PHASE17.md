@@ -1,4 +1,6 @@
-# Phase 17: Vulkan Op Trace for Nemotron (LLM_ARCH_DECI)
+# Phase 17: Vulkan Op Trace for Nemotron
+
+## Part 1: LLM_ARCH_DECI (Nemotron-51B, Nemotron-Ultra-253B)
 
 ## Model Architecture
 
@@ -222,3 +224,174 @@ If flash attention is not supported on a device, the non-flash path is used — 
 | `src/llama-build-context.cpp` | 543-600 | `llm_build_kv_store()` — KV cache writes |
 | `src/llama-build-context.cpp` | 1769-1807 | `llm_build_mul_mat_qkv()` — Q/K/V projections |
 | `ggml/src/ggml-vulkan.cpp` | 11059-11407 | `ggml_backend_vk_supports_op()` — Vulkan op support |
+
+---
+
+## Part 2: nemotron_h_moe (Nemotron-3-Nano-30B-A3B)
+
+### Target Model
+
+**Nemotron-3-Nano-30B-A3B** uses the `nemotron_h_moe` architecture — a hybrid Mamba2 + Attention + MoE model. Available at `/opt/models/nemotron-3-nano/` in Q5_K_XL, Q6_K_XL, Q8_0, and Q8_K_XL quantizations.
+
+This is fundamentally different from DECI. DECI is a pure transformer with per-layer flexibility. `nemotron_h_moe` combines three distinct layer types: Mamba2 SSM, standard attention, and MoE FFN.
+
+### Model Metadata (from GGUF)
+
+- `block_count`: 52 layers
+- `embedding_length`: 2688
+- `attention.head_count`: 32, `key_length`: 128, `value_length`: 128
+- `expert_count`: 128, `expert_used_count`: 6, `expert_shared_count`: 1
+- `ssm.conv_kernel`: 4, `ssm.state_size`: 128, `ssm.group_count`: 8, `ssm.inner_size`: 4096
+- `rope.dimension_count`: 84
+
+### Fork Status
+
+**Our fork (`ik_llama.cpp`) does not recognize `nemotron_h_moe`.** The architecture enum, model loading, tensor mapping, and graph builder are all absent. Only `LLM_ARCH_DECI` is present.
+
+Upstream llama.cpp (added as `llama.cpp` submodule) fully supports all three Nemotron variants: `nemotron`, `nemotron_h`, `nemotron_h_moe`.
+
+### Layer Types
+
+Each of the 52 layers is one of three types, determined per-layer by `hparams.is_recurrent(il)` and `hparams.n_ff(il)`:
+
+1. **Mamba2 SSM layers** — recurrent state-space model with 1D convolution
+2. **Attention layers** — standard multi-head attention with RoPE
+3. **MoE FFN layers** — 128 experts with sigmoid gating, top-6 selection, plus 1 shared expert
+
+Graph builder: `llm_build_nemotron_h` (inherits `llm_build_mamba_base`) at upstream `src/models/nemotron-h.cpp`.
+
+### Op Trace: Mamba2 SSM Layer
+
+| Op | Purpose | Fork Vulkan | Upstream Vulkan |
+|---|---|---|---|
+| `RMS_NORM` | Input normalization | **YES** | **YES** |
+| `MUL_MAT` | Input projection (in_proj) | **YES** | **YES** |
+| `CONCAT` | Merge conv history + current token | **YES** | **YES** |
+| **`SSM_CONV`** | 1D convolution (kernel=4) | **NO** | **YES** |
+| `ADD` | Conv bias | **YES** | **YES** |
+| `SILU` | Activation | **YES** | **YES** |
+| **`SSM_SCAN`** | Structured state-space scan (d_state=128, n_group=8) | **NO** | **YES** |
+| `CPY` | Store last SSM state | **YES** | **YES** |
+| `MUL` + `ADD` | Skip connection (d matrix) | **YES** | **YES** |
+| **`SWIGLU`** | Gate output with z projection | **NO** | **YES** |
+| `GROUP_NORM` | Grouped RMS normalization (n_group=8) | **YES** | **YES** |
+| `MUL_MAT` | Output projection (out_proj) | **YES** | **YES** |
+
+### Op Trace: Attention Layer
+
+| Op | Purpose | Fork Vulkan |
+|---|---|---|
+| `RMS_NORM` | Attention norm | **YES** |
+| `MUL_MAT` ×3 | Q, K, V projections | **YES** |
+| `RESHAPE` ×2 | Q, K reshape | **YES** (zero-cost) |
+| `ROPE` ×2 | Rotary position embedding (dim=84) | **YES** |
+| `CPY` ×2 | KV cache writes | **YES** |
+| `FLASH_ATTN_EXT` | Flash attention (hs=128, F16 KV) | **YES** |
+| `MUL_MAT` | Output projection (Wo) | **YES** |
+
+All attention ops are fully supported — identical to the DECI attention path.
+
+### Op Trace: MoE FFN Layer
+
+| Op | Purpose | Fork Vulkan | Upstream Vulkan |
+|---|---|---|---|
+| `RMS_NORM` | FFN input norm | **YES** | **YES** |
+| `MUL_MAT` | Gate logits (router) | **YES** | **YES** |
+| `SIGMOID` | Expert probabilities | **YES** | **YES** |
+| **`ARGSORT` (top_k)** | Select top-6 experts | Partial | **YES** |
+| `GET_ROWS` | Extract routing weights | **YES** | **YES** |
+| **`MUL_MAT_ID`** ×2+ | Expert up/down projections | **YES** | **YES** |
+| **`ADD_ID`** | Expert-specific biases | **NO** | **YES** |
+| `RELU` + `SQR` | Activation (ReLU²) | **YES** | **YES** |
+| `MUL` | Apply routing weights | **YES** | **YES** |
+| `MUL_MAT` ×2 | Shared expert up/down | **YES** | **YES** |
+| **`SET_ROWS`** | MoE output aggregation | **NO** | **YES** |
+| `ADD` | Combine MoE + shared expert | **YES** | **YES** |
+
+### Missing Ops for nemotron_h_moe
+
+**5 ops must be added** to the fork's Vulkan backend:
+
+| Op | Used In | Complexity | Notes |
+|---|---|---|---|
+| `SSM_CONV` | Mamba2 — 1D convolution | Medium | Upstream has shader |
+| `SSM_SCAN` | Mamba2 — parallel associative scan | **High** | Upstream has shader; most complex op |
+| `SWIGLU` | Mamba2 — gated activation | Low | Upstream has shader |
+| `ADD_ID` | MoE — indexed bias add | Low | Upstream has shader |
+| `SET_ROWS` | MoE — scatter results | Medium | Upstream has shader (commented out in fork) |
+
+**1 op may need extension:**
+
+| Op | Issue |
+|---|---|
+| `ARGSORT` | Fork has standard argsort. Upstream added `argsort_top_k` for MoE routing. Need to verify compatibility. |
+
+### Architecture Support Gap
+
+Beyond the 5 missing Vulkan ops, the fork needs:
+
+1. **Architecture registration**: Add `LLM_ARCH_NEMOTRON_H_MOE` (and `NEMOTRON_H`, `NEMOTRON`) to the architecture enum
+2. **Model loading**: Tensor name mapping for all nemotron_h_moe tensors (401 tensors in the GGUF)
+3. **Graph builder**: `build_nemotron_h_moe()` — hybrid layer dispatch (SSM vs attention vs MoE per layer)
+4. **Recurrent state management**: Mamba2 requires conv state + SSM state caching (different from KV cache)
+5. **MoE routing logic**: Expert selection, scatter/gather for parallel expert computation
+
+The cleanest path is to port the upstream `llm_build_nemotron_h` and `llm_build_mamba_base` implementations, then ensure all ops have Vulkan shaders.
+
+### Files Referenced (upstream llama.cpp)
+
+| File | Role |
+|---|---|
+| `src/models/nemotron-h.cpp` | `llm_build_nemotron_h` graph builder |
+| `src/models/mamba-base.cpp` | `llm_build_mamba_base` — SSM layer builder |
+| `src/llama-graph.cpp` | `build_moe_ffn` — MoE FFN builder |
+| `ggml/src/ggml-vulkan/ggml-vulkan.cpp` | Upstream Vulkan backend — has all required shaders |
+
+---
+
+## Test Coverage Audit
+
+Every compute op in the DECI hot path (and shared ops with nemotron_h_moe) was cross-referenced against `test-backend-ops.cpp`.
+
+### Previously Well-Covered
+
+| Op | Config | Tests | Notes |
+|---|---|---|---|
+| `MUL_MAT` | Q4_K/Q6_K × F32 | **Extensive** | Standard suite, all quant types |
+| `ROPE` | head_dim=128, mode=0 | **Well covered** | 128-dim explicitly tested |
+| `FLASH_ATTN_EXT` | hs=128, F16 KV, causal | **Well covered** | Full parameter matrix |
+| `CPY` | F32→F16 KV writes | **Well covered** | All type combos |
+| `GET_ROWS` | Embedding lookup | **Adequate** | Multiple types, batch sizes |
+| `ADD` / `SCALE` | Residual connections | **Well covered** | Broadcast + non-broadcast |
+
+### Gaps Found and Fixed
+
+| Op | Before | After | Notes |
+|---|---|---|---|
+| FUSED_RMS_NORM | 0 tests | 7 | 4 epsilon values + 3 dimension variants |
+| FUSED_MUL_UNARY | 0 tests | 8 | 3 activations × 2 dims + 2 edge cases |
+| CONT | 1 test | 8 | F16 type, Nemotron-scale shapes. No quant implications — operates on F32/F16, never quantized weights. |
+| SOFT_MAX | 52 tests | 63 | wg512 path (ncols>1024), F16 mask pipeline, Nemotron attention dims |
+
+### Dual-GPU Verification (RADV VEGA10 + RADV NAVI21)
+
+All tests verified on both GPUs:
+
+| Suite | Vega (wave64) | 6800 XT (wave32) |
+|---|---|---|
+| FUSED_UP_GATE | 143/143 PASS | 143/143 PASS |
+| MULTI_ADD | 12/12 PASS | 12/12 PASS |
+| FUSED_RMS_NORM | 7/7 PASS | 7/7 PASS |
+| FUSED_MUL_UNARY | 8/8 PASS | 8/8 PASS |
+| CONT | 8/8 PASS | 8/8 PASS |
+| SOFT_MAX | 63/63 PASS | 63/63 PASS |
+| Standard ops | 1222/1222 PASS | 1222/1222 PASS |
+
+### Final Test Counts
+
+| Suite | Count | Status |
+|---|---|---|
+| Standard backend-ops | 1222/1222 | PASS |
+| FUSED_UP_GATE (custom eval) | 143/143 | PASS |
+| MULTI_ADD (custom eval) | 12/12 | PASS |
+| **Total** | **1377** | **PASS** |
