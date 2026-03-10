@@ -81,6 +81,21 @@ Nemotron-Nano-4B-Q4_K_M, Vega + 6800 XT, `-c 2048`, 18-token prompt + 49 generat
 - **Token gen +20%** (6.5 → 7.8 tok/s): Modest gain because the per-token REDUCE data is small (6KB F16) — fence latency dominates, not data movement.
 - **Remaining gap**: Graph split is still 2.4× slower than layer split for token gen. The 128 fence waits per token (2 per REDUCE × 64 REDUCEs) cost ~20-50μs each ≈ 2.5-6.4ms overhead per token. The rest is actual GPU compute overhead from 193 splits.
 
+## Bug Fix: SUM_ROWS for 4D Tensors
+
+Found during post-REDUCE backend-ops testing. Three independent bugs caused SUM_ROWS to fail on `ne=[10,10,10,10]`:
+
+| Bug | Location | Root Cause |
+|---|---|---|
+| GPU descriptor range | `ggml_vk_op_f32` | `x_sz` and `d_sz` computed from `ne00×ne01` (first 2 dims), but SUM_ROWS reads all rows across all 4 dims. Shader could only see 100 of 10000 input elements. |
+| GPU out-of-bounds writes | `sum_rows.comp` | Dispatch rounds up to 512-multiples (1024 workgroups for 1000 rows). No bounds check — 24 extra workgroups wrote past output buffer. |
+| CPU index calculation | `ggml.c:14217` | Used `ne0` (dst ne[0] = 1) instead of `ne02` (= 10) when decomposing linear row index. Produced `i1 = 728` for a tensor with `ne01 = 10`. |
+
+Fixes:
+- Override `x_sz = ggml_nbytes(src0)` and `d_sz = ggml_nbytes(dst)` for SUM_ROWS/SUM ops
+- Pass `nrows` via `KY` push constant, add `if (row >= p.KY) return;` in shader
+- Change `ne0` → `ne02` in CPU `ggml_compute_forward_sum_rows_f32`
+
 ## Future Optimization
 
 - **Async pipelining (Step 3)**: Overlap REDUCE transfers with subsequent GPU compute. Would require integrating REDUCE into the `pending_xdev_copies` flow instead of synchronous fence waits.

@@ -19,5 +19,8 @@
 - [Phase 16: Backend-Ops Testing and Bug Fixes](PHASE16.md)
 - [Phase 17: Vulkan Op Trace for Nemotron](PHASE17.md)
 - [Phase 18: GPU-Accelerated REDUCE via dmabuf](PHASE18.md)
+- [Phase 19: Graph-Split Correctness](PHASE19.md)
+- [Phase 20: Vega Rapid Packed Math Optimization](PHASE20.md)
+- [Phase 21: nemotron_h_moe Architecture Support](PHASE21.md)
 - [Benchmarks](BENCHMARKS.md)
 - [Memory](MEMORY.md)
