@@ -18,8 +18,8 @@
 - dmabuf detection mismatch in print_gpu_info accepted as cosmetic (device init does full probe)
 
 ## Hardware
-- **Local (retro)**: Xeon X5650, Polaris 12 + lavapipe, no AVX2
-- **Remote (target)**: Ryzen 9 3950X, RX 6800 XT + Vega 56/64, AVX2, ssh localhost -p 8022
+- **Local (zen2)**: Ryzen 9 3950X, RX 6800 XT + Vega 64, AVX2
+- **Alternate (retro)**: Xeon X5650, Polaris 12 + lavapipe, no AVX2 — available if needed
 
 ## Phase 13: FUSED_UP_GATE
 - Shader bug found and fixed: gate accumulation loop in mul_mm_fused_up_gate.comp was missing cache_b reload. With WNITER>1 and N<BN, gate pass reused stale zeros from UP pass, producing all-zero output.
