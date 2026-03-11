@@ -69,6 +69,12 @@
 - Optimization strategy: f16vec2 packed arithmetic + careful VGPR budgeting (≤32 regs for max occupancy) + full 64-lane wavefront subgroup reductions.
 - AMDVLK is extinct; RADV is the sole Vulkan driver for GCN. RADV continues improving but dedicated GCN shader optimization in inference frameworks is an unfilled niche.
 
+## Phase 0: K-Quant Dequant Bounds Check Bug (2026-03-11)
+- 5 K-quant dequant shaders (q2_k through q6_k) used `p.M * p.K / QUANT_K` for bounds checking. For multi-batch tensors, `p.M×p.K` only covers one batch — remaining batches left as uninitialized garbage in prealloc buffer.
+- Fix: change to `p.nel / QUANT_K` (nel = total elements across all batches).
+- This single fix resolved all 10 test-backend-ops failures: 4 direct (q4_K×f16 batched) + 6 indirect (prealloc buffer contamination causing flaky bf16, iq4_xs, iq3_xxs, CPY failures).
+- Key insight: "flaky" test failures in GPU backends can be prealloc buffer contamination from a completely different operation's bug.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
