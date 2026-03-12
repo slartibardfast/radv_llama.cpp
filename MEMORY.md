@@ -72,8 +72,15 @@
 ## Phase 0: K-Quant Dequant Bounds Check Bug (2026-03-11)
 - 5 K-quant dequant shaders (q2_k through q6_k) used `p.M * p.K / QUANT_K` for bounds checking. For multi-batch tensors, `p.M×p.K` only covers one batch — remaining batches left as uninitialized garbage in prealloc buffer.
 - Fix: change to `p.nel / QUANT_K` (nel = total elements across all batches).
-- This single fix resolved all 10 test-backend-ops failures: 4 direct (q4_K×f16 batched) + 6 indirect (prealloc buffer contamination causing flaky bf16, iq4_xs, iq3_xxs, CPY failures).
+- This single fix resolved 7 of 10 test-backend-ops failures: 4 direct (q4_K×f16 batched) + 3 indirect (prealloc contamination for iq3_xxs).
 - Key insight: "flaky" test failures in GPU backends can be prealloc buffer contamination from a completely different operation's bug.
+
+## Phase 0 Round 2: Push Constant & get_offsets Alignment (2026-03-12)
+- Aligned fork's mul_mat_vec push constant struct with upstream: added fusion_flags, base_work_group_y (non-ID) / expert_i1, nbi1 (ID).
+- Moved `batch_stride_a / QUANT_K` division into get_offsets() (matching upstream), removed inline `a_offset / QUANT_K` from mul_mat_vec.comp and 12 specialized shaders.
+- Fixed iq3_xxs MUL_MAT and MUL_MAT_ID (both now pass).
+- 3 failures remain: iq4_xs MUL_MAT (NMSE=0.040), bf16 k=1 MUL_MAT (NMSE=4.2), iq4_xs MUL_MAT_ID (NMSE=0.032). All reproduce in isolation — NOT contamination.
+- bf16 is the deepest puzzle: GLSL is truly identical to upstream, push constants now match, yet massive errors. Only remaining structural difference is 2 extra descriptor bindings (Fuse0/Fuse1) in upstream SPIR-V.
 
 ## Vega Inference Bug: get_tensor_async Race Condition (2026-03-11)
 - **Root cause**: `get_tensor_async` calls `buffer_read_2d_async` which does a synchronous memcpy from host-visible (rBAR) GPU buffer. But `get_tensor_async` is called BEFORE `synchronize()`, so GPU compute may still be in flight. On Vega (slower), the CPU reads stale data; on 6800 XT (faster), the GPU usually finishes in time — pure timing-dependent race.
