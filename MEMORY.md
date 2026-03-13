@@ -106,6 +106,15 @@
 - **Rule**: ALWAYS verify CPU reference output before debugging GPU. Large NMSE (>1.0) is a red flag for CPU reference bugs, not GPU bugs. Edge-case dimensions (k=1) break CPU alignment assumptions.
 - Remaining 4 failures: iq4_xs MUL_MAT, iq3_xxs MUL_MAT (marginal), iq4_xs MUL_MAT_ID, 2x CPY f32→iq4_nl.
 
+## Phase 0 Round 5: iq4_xs Was Also a CPU Bug (2026-03-13)
+- **Same pattern as bf16**: iq4_xs MUL_MAT (NMSE=0.027) was NOT a GPU bug. GPU matched float64 expected at machine epsilon (1.8e-14). IQK's AVX2 `DequantizerIQ4XS` kernel has a systematic computation error in its unsigned-value bias compensation.
+- **Fix**: Added scalar iq4_xs×Q8_K dot product (`mul_mat_iq4_xs_q8_K_scalar`) using signed `kvalues_iq4nl` directly. Used on non-AVX512 systems. CPU NMSE: 0.027 → 2.97e-05.
+- **Collateral fix**: iq3_xxs MUL_MAT (marginal, NMSE=0.00065) now passes — likely IQK precision improvement from the same scalar fallback approach.
+- **iq4_xs dequantize4 byte-by-byte vs packed32**: Verified mathematically equivalent (same bits after shift+mask). NOT a bug despite the code difference.
+- **ggml-cpu fallback path is broken**: When IQK returns false from `iqk_set_kernels_kquants`, ggml-cpu's standard `ggml_vec_dot` fallback produces zeros. Must fix IQK internally, not disable it.
+- Remaining 3 failures: MUL_MAT_ID(iq3_xxs) marginal, 2x CPY f32→iq4_nl.
+- Also discovered: `ggml_internal_get_type_traits(GGML_TYPE_IQ4_XS).to_float` requires `ggml_init()` first — the `ggml_table_f32_f16` lookup table is populated lazily during init. Standalone tests that skip init get zeros from dequantize functions.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
