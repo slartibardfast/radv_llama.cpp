@@ -25,7 +25,7 @@
 5. [PHASE 5: Topology Discovery and Performance Tuning](PHASE5.md) — **COMPLETE**
 6. [PHASE 6: Runtime Testing, IQK Fallbacks, and lavapipe Fixes](PHASE6.md) — **COMPLETE**
 
-### Performance (planned)
+### Performance (complete)
 
 7. [PHASE 7: Async Cross-Device Copy Pipeline](PHASE7.md) — **COMPLETE**
 8. [PHASE 8: Double-Buffered Staging](PHASE8.md) — **COMPLETE**
@@ -33,6 +33,23 @@
 10. [PHASE 10: True Async Graph Compute](PHASE10.md) — **COMPLETE**
 11. [PHASE 11: Transfer Queue Utilization During Graph Execution](PHASE11.md) — SKIPPED (cross-device copies already use transfer queues; no DMA/compute overlap opportunity with 3 graph splits)
 12. [PHASE 12: dmabuf Zero-Copy Cross-Device Transfer (RADV)](PHASE12.md) — **COMPLETE**
+
+### Ops, Testing, and Bug Fixes (complete)
+
+13. [PHASE 13: Vulkan FUSED_UP_GATE Support](PHASE13.md) — **COMPLETE**
+14. [PHASE 14: Vulkan Support for Qwen3.5 Recurrent Layers](PHASE14.md) — **COMPLETE**
+15. [PHASE 15: Vulkan Support for GLM-4.7-Flash](PHASE15.md) — **COMPLETE**
+16. [PHASE 16: Backend-Ops Testing and Bug Fixes](PHASE16.md) — **COMPLETE**
+17. [PHASE 17: Vulkan Op Trace for Nemotron](PHASE17.md) — **COMPLETE**
+18. [PHASE 18: GPU-Accelerated REDUCE via dmabuf](PHASE18.md) — **COMPLETE**
+19. [PHASE 19: Graph-Split Correctness](PHASE19.md) — **COMPLETE**
+20. [PHASE 20: Vega Rapid Packed Math Optimization](PHASE20.md) — **COMPLETE**
+21. [PHASE 21: nemotron_h_moe Architecture Support](PHASE21.md) — **COMPLETE**
+22. [PHASE 22: Fix get_tensor_async Race on rBAR Devices](PHASE22.md) — **COMPLETE**
+
+### Upstream Alignment
+
+0. [PHASE 0: Backend-Ops Test Failure Fixes](PHASE0.md) — **COMPLETE** (926/926 pass)
 
 ## Upstreamability Notes
 
