@@ -90,6 +90,14 @@
 - **Why transfer_ctx->out_memcpys didn't work**: `graph_cleanup` in `sync_compute` clears `gc.contexts`, destroying the transfer context. The weak_ptr `ctx->transfer_ctx` expires, so `synchronize()` exits early without processing `out_memcpys`.
 - **Key insight**: `buffer_read` (synchronous) checks `eHostVisible && uma` before direct memcpy, but `buffer_read_2d_async` only checked `eHostVisible`. The UMA check prevented the issue on UMA devices where compute and host share coherent memory. For discrete GPUs with rBAR, the async path was broken.
 
+## Phase 0 Round 3: Structural Alignment with Upstream (2026-03-13)
+- Added Fuse0/Fuse1 buffer bindings (binding 3, 4) to mul_mat_vec_base.comp; moved IDS from binding 3 to 5. Pipeline creation 3→5 (non-ID), 4→6 (ID). Dispatch passes dummy Fuse subbuffers.
+- Disabled spirv-opt for bf16 (issue #15344) and rope (issue #16860) shaders in vulkan-shaders-gen.cpp. BUT: bf16 was already effectively unoptimized (17044 bytes matches no-opt output). Not the root cause.
+- **Neither change fixed any test failure.** Kept for structural correctness (SPIR-V and pipeline layout now match upstream).
+- Remaining 5 failures unchanged: bf16 k=1 (NMSE~3-6), iq4_xs MUL_MAT (NMSE~0.02), iq4_xs MUL_MAT_ID (NMSE~0.03), 2x CPY f32→iq4_nl.
+- Key remaining upstream differences: (1) iq4_xs dequantize4 reads individual bytes vs upstream's packed32+unpack8, (2) no data_a_packed32/v4/packed16 buffer aliases, (3) bf16 k=1 passes alone but fails in full suite despite using own buffer (not prealloc).
+- Build system caveat: changing vulkan-shaders-gen.cpp does NOT auto-trigger shader regen. Must manually rm -rf build/ggml/src/vulkan-shaders-gen-prefix, rebuild tool, then re-run it.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
