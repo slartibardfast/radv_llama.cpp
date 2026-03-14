@@ -32,8 +32,9 @@ Mixed-generation discrete AMD GPUs over PCIe. The 6800 XT (RDNA 2) is roughly 2x
 |-------|-------------|------|------------|-------------------|
 | TinyLlama 1.1B Chat v1.0 | Q2_K | 459 MiB | 1.1 B | 2 (optimal) |
 | Llama-2-7B | Q8_0 | 6.7 GiB | 6.7 B | 2 (optimal) |
+| Llama-2-13B | Q8_0 | 13 GiB | 13 B | 2 (optimal) |
 
-Sources: `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF`, `TheBloke/Llama-2-7B-GGUF`
+Sources: `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF`, `TheBloke/Llama-2-7B-GGUF`, `TheBloke/Llama-2-13B-GGUF`
 
 ### Model Compatibility Notes
 
@@ -52,11 +53,6 @@ Not all models work efficiently on the ik_llama.cpp Vulkan backend. Models with 
 Graph splits > ~5 on single GPU indicates ops falling back to CPU — a performance disaster regardless of GPU speed.
 
 ## Results
-
-> **Note**: All System B results below were gathered BEFORE Phase 0 bug fixes
-> (IQK scalar fallbacks, push constant alignment). These numbers are preserved
-> for historical reference but must be re-measured. System A results (Polaris 12)
-> are unaffected by Phase 0 changes.
 
 ### System A: Retro Baseline (Polaris 12 + lavapipe)
 
@@ -82,109 +78,8 @@ No improvement because lavapipe's "uploads" are instant memcpy. Benefit requires
 
 ### System B: Real Multi-GPU (RX 6800 XT + Vega)
 
-#### TinyLlama 1.1B Q2_K (125 token prompt, 4 eval tokens)
-
-| Configuration | Prompt eval | Token gen | Load time |
-|--------------|------------|-----------|-----------|
-| RX 6800 XT alone | 53 ms (2372 tok/s) | 10.96 ms/tok (91 tok/s) | 149 ms |
-| Vega alone | 92 ms (1354 tok/s) | 13.12 ms/tok (76 tok/s) | 375 ms |
-| Both GPUs (smgs 1:1) | 131 ms (958 tok/s) | 15.78 ms/tok (63 tok/s) | 271 ms |
-
-#### Llama-2-7B Q8_0 (127 token prompt, 4 eval tokens, best of 3)
-
-| Configuration | Prompt eval | Token gen | Load time |
-|--------------|------------|-----------|-----------|
-| RX 6800 XT alone | 166 ms (767 tok/s) | 25.95 ms/tok (38.5 tok/s) | 1919 ms |
-| Vega alone | 306 ms (416 tok/s) | 33.07 ms/tok (30.2 tok/s) | 5293 ms |
-| Both GPUs (smgs 1:1) | 396 ms (321 tok/s) | 41.12 ms/tok (24.3 tok/s) | 3554 ms |
-
-#### Analysis
-
-Multi-GPU is **slower** than single GPU for both models. This is expected and correct:
-
-1. **Both models fit on one GPU**: TinyLlama (459 MiB) and Llama-2-7B (6.7 GiB) both fit in 16 GB (6800 XT). No need to split.
-2. **Transfer overhead dominates**: Every token requires cross-device copies through host staging (GPU A → host → GPU B). For models this size, the copy time (~15 ms/tok) exceeds the compute savings from splitting.
-3. **Asymmetric GPUs**: The 6800 XT is ~1.3-1.8x faster than Vega depending on workload. With 1:1 split, the faster GPU idles waiting for the slower one.
-4. **Graph splits = 3**: Minimal parallelism opportunity. Each split boundary requires a synchronization point.
-
-#### Cross-device transfer overhead
-
-Measured consistently across both models:
-
-| Model | Single GPU best | Multi-GPU | Overhead per token |
-|-------|----------------|-----------|-------------------|
-| TinyLlama 1.1B | 11.0 ms/tok | 15.8 ms/tok | ~5 ms |
-| Llama-2-7B | 26.0 ms/tok | 41.1 ms/tok | ~15 ms |
-
-The overhead scales with model size (more data to transfer per split boundary). For a 70B model where single-token eval takes ~200-500ms, this ~15 ms overhead would be negligible (<5%).
-
-#### When Multi-GPU Helps
-
-Multi-GPU split mode graph is designed for models that **don't fit** on a single GPU:
-
-- **70B models** across 2x 24GB GPUs: each GPU gets ~35B worth of layers. Without splitting, the model simply doesn't load.
-- **Large batch prompt processing**: With enough compute per split, the transfer overhead becomes negligible relative to matmul time.
-- **Memory-bandwidth-bound workloads**: Splitting across GPUs effectively doubles available memory bandwidth.
-
-The overhead measured here would be negligible for larger models where compute time per token is much higher.
-
-#### Llama-2-13B Q8_0 (127 token prompt, 4 eval tokens, best of 3)
-
-13 GB model — fits on 6800 XT alone (14.6 GB with KV cache), but a natural candidate for splitting.
-
-| Configuration | Prompt eval | Token gen | Load time |
-|--------------|------------|-----------|-----------|
-| RX 6800 XT alone | 275 ms (462 tok/s) | 37.64 ms/tok (26.6 tok/s) | 4068 ms |
-| Both GPUs smgs 1:1 | 547 ms (232 tok/s) | 63.52 ms/tok (15.7 tok/s) | 7058 ms |
-| Both GPUs smgs 2:1 | 502 ms (253 tok/s) | 59.28 ms/tok (16.9 tok/s) | 5998 ms |
-
-Weights distribution (smgs 1:1): Vulkan0 = 6750 MiB, Vulkan1 = 6274 MiB. KV cache split: Vulkan0 = 840 MiB, Vulkan1 = 760 MiB.
-
-Multi-GPU is still slower because the model fits on one GPU. The 2:1 split is ~7% faster than 1:1 — weighting toward the faster 6800 XT reduces idle time.
-
-#### Transfer overhead scaling
-
-| Model | Size | Single GPU | Multi-GPU 1:1 | Overhead/tok |
-|-------|------|-----------|--------------|-------------|
-| TinyLlama 1.1B | 459 MiB | 11.0 ms/tok | 15.8 ms/tok | ~5 ms |
-| Llama-2-7B | 6.7 GiB | 26.0 ms/tok | 41.1 ms/tok | ~15 ms |
-| Llama-2-13B | 13.0 GiB | 37.6 ms/tok | 63.5 ms/tok | ~26 ms |
-
-The overhead scales roughly with model size. For models large enough to genuinely require splitting (>16 GB), the compute savings from not running out of VRAM far outweigh this transfer cost — the alternative is not being able to run at all.
-
-### Phase 12: dmabuf Zero-Copy (RX 6800 XT + Vega)
-
-#### TinyLlama 1.1B Q2_K (111 token prompt, 3 eval tokens, best of 3)
-
-| Configuration | Prompt eval | Token gen | Load time |
-|--------------|------------|-----------|-----------|
-| RX 6800 XT alone | 99 ms (1117 tok/s) | 11.08 ms/tok (90 tok/s) | 236 ms |
-| Both GPUs (smgs 1:1) | 106 ms (1043 tok/s) | 10.34 ms/tok (97 tok/s) | 271 ms |
-
-#### Llama-2-7B Q8_0 (109 token prompt, 3 eval tokens, best of 3)
-
-| Configuration | Prompt eval | Token gen | Load time |
-|--------------|------------|-----------|-----------|
-| RX 6800 XT alone | 285 ms (382 tok/s) | 24.98 ms/tok (40 tok/s) | 2995 ms |
-| Both GPUs (smgs 1:1) | 306 ms (356 tok/s) | 25.77 ms/tok (39 tok/s) | 3596 ms |
-
-#### Llama-2-13B Q8_0 (109 token prompt, 3 eval tokens, best of 3)
-
-| Configuration | Prompt eval | Token gen | Load time |
-|--------------|------------|-----------|-----------|
-| RX 6800 XT alone | 465 ms (234 tok/s) | 50.27 ms/tok (20 tok/s) | 5999 ms |
-| Both GPUs (smgs 1:1) | 510 ms (214 tok/s) | 46.60 ms/tok (21 tok/s) | 7061 ms |
-| Both GPUs (smgs 2:1) | 465 ms (234 tok/s) | 50.25 ms/tok (20 tok/s) | 5998 ms |
-
-#### Phase 12 vs Phase 10: Transfer Overhead Comparison
-
-| Model | Phase 10 overhead/tok | Phase 12 overhead/tok | Improvement |
-|-------|----------------------|----------------------|-------------|
-| TinyLlama 1.1B | ~5 ms | ~-0.7 ms | Eliminated |
-| Llama-2-7B | ~15 ms | ~1 ms | 15x reduction |
-| Llama-2-13B (1:1) | ~26 ms | ~-4 ms | Eliminated |
-
-dmabuf eliminates CPU memcpy overhead. Multi-GPU token generation is now **faster** than single-GPU for TinyLlama (97 vs 90 tok/s) and Llama-2-13B 1:1 (21 vs 20 tok/s) due to doubled memory bandwidth outweighing the minimal remaining transfer cost.
+> Results pending re-measurement after Phase 0 bug fixes.
+> Pre-Phase 0 data available in git history at commit `c97afb6`.
 
 ## Runtime Flags
 
