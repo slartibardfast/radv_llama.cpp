@@ -1,8 +1,10 @@
 # Phase 19: Graph-Split Correctness
 
-## Problem
+## Status: COMPLETE — fixed by Phase 22 (get_tensor_async race fix)
 
-Multi-GPU graph-split mode (`-sm graph`) produces incorrect output with greedy sampling (temp=0). Single-GPU and layer-split modes produce correct output. The issue is pre-existing — both CPU-mediated and dmabuf REDUCE paths produce identical (wrong) output, confirming the bug is upstream of REDUCE.
+## Problem (historical)
+
+Multi-GPU graph-split mode (`-sm graph`) produced incorrect output with greedy sampling (temp=0). Single-GPU and layer-split modes produced correct output. The issue was pre-existing — both CPU-mediated and dmabuf REDUCE paths produced identical (wrong) output, confirming the bug was upstream of REDUCE.
 
 ## Symptoms
 
@@ -28,6 +30,13 @@ Graph split:  "The capital of France is Hemddddddddddddddddddd"  ← wrong
 2. Find the first layer where outputs diverge
 3. Trace back to the source of divergence (weight split, residual, norm)
 
-## Verify by
+## Verification (2026-03-18)
 
-Graph-split and single-GPU produce identical output with `--temp 0`.
+Tested post-Phase 0/22 with `--temp 0` greedy sampling:
+
+```
+Single GPU:  " Paris.\n\n2. The capital of the United States is Washington, D.C."
+Graph split: " Paris.\n\n2. The capital of the United States is Washington, D.C."
+```
+
+Verified on both TinyLlama 1.1B Q2_K and Llama-2-7B Q8_0. Output is identical between single-GPU and graph-split modes. The root cause was the `get_tensor_async` race condition on rBAR devices (Phase 22) — stale data was read before GPU compute completed.

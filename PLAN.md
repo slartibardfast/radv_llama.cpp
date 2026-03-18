@@ -42,7 +42,7 @@
 16. [PHASE 16: Backend-Ops Testing and Bug Fixes](PHASE16.md) — **COMPLETE**
 17. [PHASE 17: Vulkan Op Trace for Nemotron](PHASE17.md) — **COMPLETE**
 18. [PHASE 18: GPU-Accelerated REDUCE via dmabuf](PHASE18.md) — **COMPLETE**
-19. [PHASE 19: Graph-Split Correctness](PHASE19.md) — PLANNED
+19. [PHASE 19: Graph-Split Correctness](PHASE19.md) — **COMPLETE** (fixed by Phase 22)
 20. [PHASE 20: Vega Rapid Packed Math Optimization](PHASE20.md) — PLANNED
 21. [PHASE 21: nemotron_h_moe Architecture Support](PHASE21.md) — PLANNED
 22. [PHASE 22: Fix get_tensor_async Race on rBAR Devices](PHASE22.md) — **COMPLETE**
