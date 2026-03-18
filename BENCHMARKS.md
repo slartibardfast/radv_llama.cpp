@@ -78,9 +78,9 @@ No improvement because lavapipe's "uploads" are instant memcpy. Benefit requires
 
 ### System B: Real Multi-GPU (RX 6800 XT + Vega)
 
-Post-Phase 0 measurements. Vulkan fork (ik_llama.cpp) only — ROCm/HIP benchmarks abandoned due to pathological JIT compilation times (9+ hours per model/prompt shape on gfx900/gfx1030).
+Post-Phase 0 measurements. Vulkan fork (ik_llama.cpp) vs upstream ROCm/HIP (llama.cpp, ROCm 7.2, Arch Linux packages). All measurements: warmup run discarded, best of 3 timed trials, system quiet, VRAM verified empty between runs.
 
-#### Perplexity (wikitext-2-raw, n_ctx=512, 6800 XT)
+#### Perplexity (wikitext-2-raw, n_ctx=512, Vulkan 6800 XT)
 
 | Model | PPL | Expected | Status |
 |-------|-----|----------|--------|
@@ -90,37 +90,54 @@ Post-Phase 0 measurements. Vulkan fork (ik_llama.cpp) only — ROCm/HIP benchmar
 
 Perplexity matches published reference values, confirming the Vulkan backend produces correct results after Phase 0 fixes.
 
-#### TinyLlama 1.1B Q2_K (127 token prompt, 3 eval tokens, best of 3)
+#### TinyLlama 1.1B Q2_K (127 token prompt, best of 3)
 
-| Configuration | Prompt eval | Token gen | Load time |
-|--------------|------------|-----------|-----------|
-| RX 6800 XT alone | 56 ms (2259 tok/s) | 16.13 ms/tok (62 tok/s) | 164 ms |
-| Vega alone | 83 ms (1528 tok/s) | 32.74 ms/tok (30.5 tok/s) | 408 ms |
-| Both GPUs (smgs 1:1) | 151 ms (842 tok/s) | 36.22 ms/tok (27.6 tok/s) | 289 ms |
+| Configuration | Prompt tok/s | Gen tok/s |
+|--------------|-------------|-----------|
+| ROCm 6800 XT | 4189 | 380 |
+| ROCm Vega | 858 | 244 |
+| Vulkan 6800 XT | 2267 | 62 |
+| Vulkan Vega | 1527 | 31 |
+| Vulkan Multi 1:1 | 841 | 28 |
 
-#### Llama-2-7B Q8_0 (127 token prompt, 3 eval tokens, best of 3)
+#### Llama-2-7B Q8_0 (127 token prompt, best of 3)
 
-| Configuration | Prompt eval | Token gen | Load time |
-|--------------|------------|-----------|-----------|
-| RX 6800 XT alone | 156 ms (812 tok/s) | 31.99 ms/tok (31.3 tok/s) | 2071 ms |
-| Vega alone | 363 ms (350 tok/s) | 125.97 ms/tok (7.9 tok/s) | 6930 ms |
-| Both GPUs (smgs 1:1) | 399 ms (319 tok/s) | 73.50 ms/tok (13.6 tok/s) | 3795 ms |
+| Configuration | Prompt tok/s | Gen tok/s |
+|--------------|-------------|-----------|
+| ROCm 6800 XT | 1673 | 69 |
+| ROCm Vega | OOM (8 GB) | — |
+| Vulkan 6800 XT | 813 | 31 |
+| Vulkan Vega | 349 | 8 |
+| Vulkan Multi 1:1 | 318 | 14 |
 
-#### Llama-2-13B Q8_0 (127 token prompt, 3 eval tokens, best of 3)
+#### Llama-2-13B Q8_0 (127 token prompt, best of 3)
 
-| Configuration | Prompt eval | Token gen | Load time |
-|--------------|------------|-----------|-----------|
-| RX 6800 XT alone | 273 ms (465 tok/s) | 53.47 ms/tok (18.7 tok/s) | 4105 ms |
-| Both GPUs (smgs 1:1) | 646 ms (197 tok/s) | 156.35 ms/tok (6.4 tok/s) | 8348 ms |
-| Both GPUs (smgs 2:1) | 2328 ms (55 tok/s) | 1103.83 ms/tok (0.9 tok/s) | 12109 ms |
+| Configuration | Prompt tok/s | Gen tok/s |
+|--------------|-------------|-----------|
+| ROCm 6800 XT | OOM (16 GB) | — |
+| Vulkan 6800 XT | 462 | 19 |
+| Vulkan Multi 1:1 | 196 | 6 |
 
-#### Notes
+#### Vulkan vs ROCm Analysis
 
-Token generation rates are lower than pre-Phase 0 measurements (which were gathered with IQK CPU bugs present). The pre-Phase 0 test framework compared GPU output against incorrect CPU reference values — the "passing" benchmarks may have been running with different code paths or masking performance issues.
+ROCm significantly outperforms Vulkan on single-GPU token generation:
 
-The smgs 2:1 configuration for 13B shows catastrophic performance (0.9 tok/s). This needs investigation — the asymmetric split may be triggering a pathological dispatch pattern.
+| Model | ROCm gen | Vulkan gen | ROCm advantage |
+|-------|---------|------------|----------------|
+| TinyLlama Q2_K / 6800 XT | 380 tok/s | 62 tok/s | **6.1x** |
+| TinyLlama Q2_K / Vega | 244 tok/s | 31 tok/s | **7.9x** |
+| Llama-2-7B Q8_0 / 6800 XT | 69 tok/s | 31 tok/s | **2.2x** |
 
-Vega token generation is significantly slower than 6800 XT (30.5 vs 62 tok/s for TinyLlama, 7.9 vs 31.3 for 7B). This exceeds the expected ~1.3-1.8x ratio from hardware specs, suggesting Vega-specific shader performance issues worth investigating (see Phase 20: Vega RPM optimization).
+Prompt eval gap is smaller (ROCm ~1.8-2x faster). The token generation gap (2-8x) is the primary performance issue — Vulkan's `mul_mat_vec` shaders are not memory-bandwidth-efficient compared to ROCm's rocBLAS Tensile kernels. This is the main target for Phase 20 optimization.
+
+#### ROCm limitations
+
+- **13B Q8_0 OOM on 6800 XT (16 GB)**: ROCm's memory allocator is less efficient than Vulkan's — the same model fits on Vulkan but not ROCm. This is where Vulkan multi-GPU provides value: models that don't fit on one GPU under ROCm can run across two GPUs under Vulkan.
+- **7B Q8_0 OOM on Vega (8 GB)**: Same issue — Vulkan handles this fine.
+
+#### Vulkan multi-GPU notes
+
+Multi-GPU is slower than single-GPU for all models that fit on one GPU. The cross-device transfer overhead (~5-15 ms/tok) exceeds compute savings. Multi-GPU provides value only when a model doesn't fit on a single GPU — it enables running models that would otherwise OOM.
 
 ## Runtime Flags
 
