@@ -164,3 +164,29 @@ Profiled mul_mat_vec with test-backend-ops perf:
 - AMD GCN5 ISA: Rapid Packed Math `v_pk_*` instructions
 - Vulkan DP4A: `VK_KHR_shader_integer_dot_product` / `dotPacked4x8EXT`
 - Benchmark data: [BENCHMARKS.md](BENCHMARKS.md)
+
+## Debugging Log: MMVQ NaN (2026-03-21)
+
+### Confirmed facts
+- Upstream Vulkan MMVQ passes ALL tests on same 6800 XT hardware
+- Our fork's MMVQ shader SPIR-V is functionally identical to upstream's
+- Every MMVQ dispatch produces NaN; every non-MMVQ dispatch passes
+- NaN persists after: x4 quantize format, NUM_ROWS=1, shmem-only reduction, VK_WHOLE_SIZE for Y buffer, 3 bindings instead of 5
+- Disabling MMVQ (should_use_mmvq returns false) → 0 failures
+
+### Ruled out
+- Shader code difference (byte-for-byte identical)
+- Q8_1 buffer format (x4 vs plain — both produce NaN)
+- NUM_ROWS spec constant (changed to 1, still NaN)
+- Subgroup reduction variant (tried shmem-only, still NaN)
+- Y descriptor range (VK_WHOLE_SIZE, still NaN)
+- Binding count mismatch (3 vs 5 — dequant also has this, works fine)
+
+### Remaining suspects
+1. **Fork's buffer management pattern**: Fork uses `vk_buffer` + explicit offset/size at dispatch. Upstream uses `vk_subbuffer` with `ggml_vk_tensor_subbuffer()`. The implicit conversion to `vk::DescriptorBufferInfo` may differ.
+2. **Push constant field mismatch**: Our fork's `vk_mat_vec_push_constants` struct may have different field layout than upstream's. Fields like `fusion_flags` and `base_work_group_y` might be at different offsets.
+3. **Pipeline descriptor set layout**: The way the fork creates descriptor set layouts from pipeline bindings may differ from upstream, causing descriptors to be bound to wrong slots.
+4. **The quantize_q8_1 dispatch itself**: The Q8_1 data written by the quantize shader may be wrong — need to read back and verify.
+
+### Next step
+Do a byte-level comparison of the push constant struct layout between fork and upstream, and verify the Q8_1 quantize output by reading back the buffer.
