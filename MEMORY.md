@@ -240,6 +240,51 @@ Headline tg32 on 6800 XT: 0.31 → 0.32 t/s — barely moved despite the split c
 
 f16acc dispatch counter (Phase 20c instrumentation) on this MoE model showed `hits=0 fallbacks=43704`. Hits=0 is correct on RDNA2 (f16acc is Vega-only). On Vega the same 43704 dispatches would hit the f16acc path — but the bottleneck is graph_splits, not compute, so the f16acc work cannot move the needle until Phase 20h lands.
 
+## Phase 20o: Vulkan DELTA_NET — final ops-coverage milestone (2026-04-08)
+
+The recurrent linear-attention core. ik fork's `ggml_delta_net` is a 6-arg
+op (q, k, v, g, beta, state) with a TRANSPOSED state storage layout
+(`state[col*head_dim + row]`) compared to upstream's `ggml_gated_delta_net`
+(`state[v_idx*S + k_idx]`). Wrote a custom shader matching ik's
+algorithm; the upstream PR #20334 served only as a parallelization template.
+
+**Architecture**: one workgroup per (head, seq); each thread holds ONE row
+of state in registers (HEAD_DIM floats). State load/store happens once per
+dispatch — amortized across n_tokens. HEAD_DIM ∈ {64, 128} via #define
+(matches iqk fast path). Two reduction strategies: shmem (universal) and
+subgroup-add (only when HEAD_DIM == subgroup_size — Vega + h64).
+
+**Two bugs found and fixed during implementation:**
+  1. Spec-constant aliasing — using `local_size_x_id = 0` while also
+     declaring `constant_id = 0 const uint HEAD_DIM` produced two distinct
+     SPIR-V spec constants both with SpecId=0; only one got bound. The
+     workgroup ran with size 1. Fix: switched to `#define HEAD_DIM` baked
+     in at SPV-gen time, two SPVs per reduction strategy.
+  2. Dispatch-grid scaling — `ggml_vk_dispatch_pipeline` divides
+     `elements` by `wg_denoms`. With `wg_denoms = {64,1,1}` and elements
+     `{H_v=2, n_seqs=1, 1}`, ceil(2/64) = 1 → only ONE workgroup
+     dispatched. Fix: pass `{H_v * HEAD_DIM, n_seqs, 1}` so the grid
+     resolves to (H_v, n_seqs, 1) workgroups after the divide.
+
+**Test coverage**: 19 cases × 2 GPUs (RDNA2 + Vega) all pass.
+
+**Headline measurement** (Qwen3.5-35B-A3B-UD-IQ3_XXS, 6800 XT, sm none):
+
+| Metric          | Pre-Phase-20 | Phase 20m | Phase 20n | Phase 20o |
+|---|---:|---:|---:|---:|
+| pp256 t/s       | 0.71 (-fmoe) |     —     |    —      | **146.41** |
+| tg64 t/s        | 0.31         |   0.32    |   0.46    |  **18.18** |
+| graph splits/tok| 322          |   122     |    62     |    **2**   |
+
+**~206× pp256 and ~58× tg64 vs the original baseline.** Every recurrent
+op in Qwen3-Next now runs on Vulkan; only 2 backend boundaries remain per
+token. After this phase the model is production-ready on RDNA2 Vulkan.
+
+**Vega NaN issue**: a separate, pre-existing bug — confirmed by stashing
+the Phase 20o changes and reproducing the same NaN logits. Not caused by
+DELTA_NET. Filed for separate investigation; the DELTA_NET shader passes
+all backend-ops tests on Vega.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
