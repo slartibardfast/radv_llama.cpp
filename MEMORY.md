@@ -170,6 +170,23 @@ For each SSM layer: roughly 5 CPU splits + 5 Vulkan return splits = 10 splits/la
 
 The decision for Phase 20j: rather than trying to chase Qwen3.5, it might be better to pick a target model that doesn't depend on SSM. If the goal stays Qwen3.5, the next phase should be a single multi-op port that includes at least L2_NORM + SOFTPLUS so the layer-internal splits collapse, then iterate.
 
+## Upstream prior work — almost everything needed exists in upstream llama.cpp (2026-04-08)
+
+Verified via `gh pr list --repo ggml-org/llama.cpp --search "vulkan <op>"`. Of the 6 ops blocking Qwen3.5-A3B, **5 of them have merged Vulkan implementations in upstream llama.cpp** that we can port directly:
+
+| Op | Upstream Vulkan PR | Status | Notes |
+|---|---|---|---|
+| L2_NORM | #19604 + #20350 | MERGED | Already 90% wired locally — shader, dispatch fn exist; case statements commented out in supports_op |
+| SOFTPLUS (UNARY) | #17319 | MERGED | giuseppe — bulk unary ops including SOFTPLUS, STEP, ROUND, CEIL, FLOOR, TRUNC |
+| SSM_CONV | #16463 + #20379 | MERGED | giuseppe (base) + ProgenyAlpha (PP scaling fix) |
+| (GATED_)DELTA_NET | #19504 (op) + **#20334 (Vulkan)** | MERGED | am17an added the op def + ProgenyAlpha added the Vulkan impl. Upstream calls it `GATED_DELTA_NET`; ik fork calls it `DELTA_NET` — need to verify op_params layout matches |
+| MUL_MULTI_ADD | — | N/A | ik-specific. No upstream equivalent. Greenfield, but logic is straightforward (gather + sum across experts) |
+| FUSED_MUL_UNARY broadcast | — (#17319 covers scalar) | N/A | Local — extend our existing supports_op shape check + maybe add broadcast variant to the existing shader |
+
+Reference: ik_llama.cpp PR #1251 (closed, "Qwen 3 Next experiment" by YurkoHoshko) — Codex-generated CUDA-only port of `ssm_conv.cu`, `gated_delta_net.cu`, etc. Provides the op_params layout reference for translating between upstream `GATED_DELTA_NET` and ik fork `DELTA_NET`.
+
+**This converts Phase 20j-20o from "write 4-6 new shaders from scratch" to "port 4 existing shaders + 1 small greenfield + 1 supports_op fix."** The shipping order — L2_NORM (trivial uncomment) → SOFTPLUS (port) → SSM_CONV (port) → FUSED_MUL_UNARY broadcast (local fix) → MUL_MULTI_ADD (greenfield) → DELTA_NET (port + op_params translation).
+
 f16acc dispatch counter (Phase 20c instrumentation) on this MoE model showed `hits=0 fallbacks=43704`. Hits=0 is correct on RDNA2 (f16acc is Vega-only). On Vega the same 43704 dispatches would hit the f16acc path — but the bottleneck is graph_splits, not compute, so the f16acc work cannot move the needle until Phase 20h lands.
 
 ## Build Notes
