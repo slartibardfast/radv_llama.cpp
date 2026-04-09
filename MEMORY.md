@@ -280,10 +280,38 @@ subgroup-add (only when HEAD_DIM == subgroup_size — Vega + h64).
 op in Qwen3-Next now runs on Vulkan; only 2 backend boundaries remain per
 token. After this phase the model is production-ready on RDNA2 Vulkan.
 
-**Vega NaN issue**: a separate, pre-existing bug — confirmed by stashing
-the Phase 20o changes and reproducing the same NaN logits. Not caused by
-DELTA_NET. Filed for separate investigation; the DELTA_NET shader passes
-all backend-ops tests on Vega.
+**Vega NaN issue**: was a pre-existing f16acc bug in Q4_K/Q5_K/Q6_K shaders,
+NOT in DELTA_NET. Fixed in Phase 20p below.
+
+## Phase 20p: f16acc fix — correct mixed-precision implementation (2026-04-09)
+
+Phase 20c (f16acc mul_mat_vec for Vega RPM) set `FLOAT_TYPE=float16_t`,
+making the ENTIRE accumulation chain f16. This caused NaN on Qwen3.5-35B-A3B
+(which uses Q6_K for 252 of 733 tensors). Test-first approach isolated it:
+
+| Type | b=10 | b=50 | Root cause |
+|---|---|---|---|
+| Q8_0, Q2_K, Q3_K, IQ* | OK | OK | No f16 scale multiply or small scales |
+| **Q4_K** | OK | **NaN** | 6-bit scale × dot overflows f16 at B=50 |
+| **Q5_K** | **NaN** | **NaN** | 6-bit scale × dot overflows f16 at B=10 |
+| **Q6_K** | **NaN** | **NaN** | 8-bit scale (±128) × dot overflows at B=10 |
+
+The overflow is in `f16vec2(dot, dot) * f16vec2(scale, scale)` — the sub-block
+scale × dot-product multiply in the Q4_K/Q5_K/Q6_K USE_F16ACC blocks.
+
+**Fix (two parts)**:
+1. Promoted the 3 scale-multiply sites to explicit `float` arithmetic.
+2. Changed `FLOAT_TYPE=float` in vulkan-shaders-gen.cpp for all f16acc
+   variants. temp[], sccache[], tmpsh[], reduce_result all f32 now.
+
+The 8 inner f16vec2 fma's (the v_pk_fma_f16 RPM benefit) are UNCHANGED.
+ISA confirmed: 1175 v_pk_fma_f16 instructions still emitted on Vega.
+
+**32 new stress tests** (`test_mul_mat_stress` with B∈[-10,10] and B∈[-50,50])
+for 8 quant types × 2 n-values. These failed before the fix (Q4_K/Q5_K/Q6_K
+NaN) and pass after. All 1309 tests pass on Vega.
+
+Qwen3.5-35B-A3B generates coherent text on Vega with f16acc enabled.
 
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
