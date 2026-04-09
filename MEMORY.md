@@ -313,6 +313,29 @@ NaN) and pass after. All 1309 tests pass on Vega.
 
 Qwen3.5-35B-A3B generates coherent text on Vega with f16acc enabled.
 
+## Phase 21: Dispatch reduction for hybrid Mamba tg (2026-04-09)
+
+Profiling (GGML_VK_PERF_LOGGER=1) revealed the hybrid Mamba model's tg
+bottleneck was NOT DELTA_NET compute — it was dispatch overhead:
+- RDNA2: 41 ms CPU dispatch overhead across 810 dispatches (~50 μs each)
+- Vega: GPU pipeline stalls of 100-250× between dependent dispatches
+  (CONCAT 2540 μs vs 17 μs on RDNA2 for the same 2 MB copy)
+
+**Tier 1: Inplace state writeback** — DELTA_NET writes SSM state directly
+to KV cache (src[5]) via STATE_INPLACE shader variants, eliminating
+CONT+CONCAT+CPY chain. GPU stall total: 198.8 → 69.5 ms (-65%).
+
+**Tier 2: GGML_OP_FUSED framework** — ported from phase25-decode-perf
+branch. Single op enum + fusion_id dispatch. First fusion: GATE_PREP
+(add+softplus+mul → 1 dispatch, saves 48 dispatches/token). SILU_MUL
+stub also landed (CPU kernel + Vulkan pipeline reusing fused_mul_silu).
+
+Combined: RDNA2 pp256 +7%, tg +1.8%. The 2.5× tg gap to dense is
+architectural (2× more ops per token for Mamba), not an optimization bug.
+
+Polaris-jit branch's megakernel/JIT was confirmed dead (12% slower than
+standard dispatch). Op-level fusions are the proven pattern.
+
 ## Build Notes
 - Use clang (GCC 15 has -Wtemplate-body errors)
 - `-DGGML_IQK_FLASH_ATTENTION=OFF` on non-AVX2 hosts
